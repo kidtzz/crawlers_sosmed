@@ -2,12 +2,17 @@
 
 import csv
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from shared.crawler_utils import (
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from crawler_utils import (  # noqa: E402
     apply_quality_filters_from_env,
     derive_topic_keywords,
     filter_and_validate_records,
@@ -16,7 +21,7 @@ from shared.crawler_utils import (
     is_spam_text,
     parse_whatsapp_invite_html,
 )
-from threads.scraper import (
+from threads.scraper import (  # noqa: E402
     BASE_DIR,
     DEFAULT_KEYWORDS,
     clean_post_text,

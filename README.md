@@ -9,25 +9,19 @@ crawlers/
 ├── README.md
 ├── requirements.txt
 ├── .gitignore
-├── shared/                     # Utilitas bersama (ekstraksi link, filter kualitas, ekspor)
-│   ├── __init__.py
-│   └── crawler_utils.py
-├── threads/                    # Scraper khusus Threads
+├── crawler_utils.py            # Utilitas bersama (filter, validasi WA, ekspor)
+├── threads/                    # Semua file Threads dalam 1 folder
 │   ├── __init__.py
 │   ├── scraper.py
+│   ├── test_scraper.py
 │   ├── .env.example
-│   ├── .env.credentials.example
-│   └── output/                 # Hasil CSV & Markdown Threads (diabaikan Git)
-├── twitter/                    # Scraper khusus Twitter (X)
-│   ├── __init__.py
-│   ├── scraper.py
-│   ├── .env.example
-│   ├── .env.credentials.example
-│   └── output/                 # Hasil CSV & Markdown X (diabaikan Git)
-└── tests/                      # Unit test terpusat
+│   └── .env.credentials.example
+└── twitter/                    # Semua file Twitter (X) dalam 1 folder
     ├── __init__.py
-    ├── test_threads_scraper.py
-    └── test_x_scraper.py
+    ├── scraper.py
+    ├── test_scraper.py
+    ├── .env.example
+    └── .env.credentials.example
 ```
 
 ## Instalasi
@@ -37,7 +31,7 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-## Konfigurasi & Cara Menjalankan
+## Cara Menjalankan
 
 ### 1. Threads
 1. Salin `threads/.env.credentials.example` menjadi `threads/.env.credentials` dan isi kredensial akun cadangan.
@@ -58,5 +52,6 @@ playwright install chromium
 ## Menjalankan Unit Test
 
 ```powershell
-python -m unittest discover -s tests -v
+python -m unittest discover -s threads -v
+python -m unittest discover -s twitter -v
 ```

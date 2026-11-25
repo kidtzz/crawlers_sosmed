@@ -17,7 +17,7 @@ ROOT_DIR = BASE_DIR.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from shared.crawler_utils import (  # noqa: E402
+from crawler_utils import (  # noqa: E402
     DEFAULT_KEYWORDS,
     DEFAULT_MAX_COMMENT_POSTS,
     DEFAULT_MAX_COMMENT_SCROLLS,
@@ -460,7 +460,7 @@ def main() -> None:
     max_comment_scrolls = parse_int_env("MAX_COMMENT_SCROLLS_PER_POST", DEFAULT_MAX_COMMENT_SCROLLS, minimum=0)
 
     state_path = resolve_project_path(os.getenv("STORAGE_STATE_FILE", "storage_state.json"))
-    output_csv = resolve_project_path(os.getenv("OUTPUT_CSV", "output/hasil_x_grup_wa.csv"))
+    output_csv = resolve_project_path(os.getenv("OUTPUT_CSV", "hasil_x_grup_wa.csv"))
     output_md = output_csv.with_suffix(".md")
 
     print(f"[INFO] Keyword aktif X ({len(keywords)}): {keywords}")

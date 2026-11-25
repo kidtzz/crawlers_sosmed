@@ -1,13 +1,18 @@
 """Unit test untuk scraper Twitter (X) dan ekstraksi link tanpa skema / t.co."""
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from shared.crawler_utils import extract_relevant_links, posts_to_records
-from twitter.scraper import (
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from crawler_utils import extract_relevant_links, posts_to_records  # noqa: E402
+from twitter.scraper import (  # noqa: E402
     BASE_DIR,
     build_search_url,
     enrich_tweet_links,

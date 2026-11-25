@@ -4,8 +4,6 @@
 **/.env.credentials
 storage_state.json
 **/storage_state.json
-output/
-**/output/
 *.csv
 **/*.csv
 hasil_*.md
