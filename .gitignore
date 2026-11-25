@@ -1,0 +1,14 @@
+.env
+**/.env
+.env.credentials
+**/.env.credentials
+storage_state.json
+**/storage_state.json
+*.csv
+**/*.csv
+hasil_*.md
+**/hasil_*.md
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
