@@ -6,28 +6,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-try:
-    from twitter.x_wa_scraper import (
-        BASE_DIR,
-        build_search_url,
-        enrich_tweet_links,
-        has_session_cookies,
-        load_environment,
-        resolve_project_path,
-        should_resolve_tco,
-    )
-    from crawler_utils import extract_relevant_links, posts_to_records
-except ImportError:
-    from x_wa_scraper import (
-        BASE_DIR,
-        build_search_url,
-        enrich_tweet_links,
-        has_session_cookies,
-        load_environment,
-        resolve_project_path,
-        should_resolve_tco,
-    )
-    from crawler_utils import extract_relevant_links, posts_to_records
+from shared.crawler_utils import extract_relevant_links, posts_to_records
+from twitter.scraper import (
+    BASE_DIR,
+    build_search_url,
+    enrich_tweet_links,
+    has_session_cookies,
+    load_environment,
+    resolve_project_path,
+    should_resolve_tco,
+)
 
 
 class TestXWAScraper(unittest.TestCase):

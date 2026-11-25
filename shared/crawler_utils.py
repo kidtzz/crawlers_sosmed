@@ -1,14 +1,18 @@
-"""Utilitas bersama untuk crawler Playwright (ekstraksi link, pembersihan teks, sesi, scroll, & ekspor)."""
+"""Utilitas bersama untuk crawler Playwright (ekstraksi link, filter kualitas, validasi WA, & ekspor)."""
 
 import csv
+import html
 import os
 import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 
@@ -21,7 +25,7 @@ except ImportError:  # Memungkinkan impor fungsi helper untuk pengujian tanpa Pl
 
 
 # =========================
-# KONSTANTA BERSAMA
+# KONSTANTA BERSAMA & FILTER
 # =========================
 
 DEFAULT_KEYWORDS = [
@@ -35,7 +39,71 @@ DEFAULT_KEYWORDS = [
     "chat.whatsapp.com english",
 ]
 
-# Regex link grup WhatsApp, URL penuh, dan domain populer tanpa skema http(s) (umum di X/Twitter)
+# Daftar kata spam default (judi online, jualan/promo, penipuan, konten dewasa)
+DEFAULT_SPAM_KEYWORDS = [
+    "judi",
+    "slot",
+    "gacor",
+    "maxwin",
+    "zeus",
+    "togel",
+    "sbobet",
+    "casino",
+    "betting",
+    "jackpot",
+    "depo",
+    "withdraw",
+    "wd",
+    "scatter",
+    "jp",
+    "pragmatic",
+    "jual",
+    "jual akun",
+    "open bo",
+    "vcs",
+    "bokep",
+    "pinjol",
+    "dana kaget",
+    "cuan instan",
+    "binary",
+    "jasa joki",
+    "joki tugas",
+    "joki skripsi",
+    "open order",
+    "ready stock",
+    "murah meriah",
+    "diskon",
+    "dropship",
+    "reseller",
+]
+
+# Kata umum non-topik yang diabaikan saat mengekstrak kata topik otomatis dari keyword pencarian
+GENERIC_SEARCH_WORDS = {
+    "grup",
+    "group",
+    "wa",
+    "whatsapp",
+    "chat",
+    "com",
+    "komunitas",
+    "community",
+    "link",
+    "join",
+    "gabung",
+    "chat.whatsapp.com",
+}
+
+# Placeholder WhatsApp ketika invite link mati/direset/tidak ditemukan
+INVALID_WA_TITLES = {
+    "",
+    "whatsapp",
+    "whatsapp group invite",
+    "group invite",
+    "invite link has expired",
+    "this invite link was reset",
+    "couldn't find this group",
+}
+
 WA_LINK_REGEX = re.compile(
     r"(?:https?://)?chat\.whatsapp\.com/(?:invite/)?([A-Za-z0-9_-]{10,})",
     re.IGNORECASE,
@@ -50,7 +118,6 @@ SCHEMELESS_URL_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-# Domain internal platform yang diabaikan sebagai link referensi eksternal
 IGNORED_DOMAINS = {
     "threads.com",
     "www.threads.com",
@@ -94,16 +161,6 @@ TRACKING_QUERY_PARAMS = {
     "t",
 }
 
-CATEGORY_PRIORITY = {
-    "Grup WhatsApp": 0,
-    "Kontak WhatsApp": 1,
-    "Google Drive": 2,
-    "Google Docs/Form": 3,
-    "Telegram": 4,
-    "Discord": 5,
-    "Link Lainnya": 6,
-}
-
 COMMENT_PRIORITY_HINTS = (
     "komen",
     "comment",
@@ -129,6 +186,9 @@ DEFAULT_MAX_SCROLLS_PER_SESSION = 30
 DEFAULT_MAX_SCROLLS_PER_KEYWORD = 4
 DEFAULT_MAX_COMMENT_POSTS = 10
 DEFAULT_MAX_COMMENT_SCROLLS = 2
+DEFAULT_WA_CHECK_DELAY_MIN = 2.0
+DEFAULT_WA_CHECK_DELAY_MAX = 4.5
+DEFAULT_MAX_WA_CHECKS = 30
 
 
 # =========================
@@ -151,15 +211,43 @@ def parse_float_env(name: str, default: float, minimum: float = 0.2) -> float:
         return default
 
 
+def parse_csv_list(raw_value: str | None) -> list[str]:
+    """Mengurai nilai dipisahkan koma menjadi list unik tanpa spasi berlebih."""
+    if not raw_value or not raw_value.strip():
+        return []
+    parsed = [item.strip() for item in raw_value.split(",") if item.strip()]
+    return list(dict.fromkeys(parsed))
+
+
 def parse_keywords(raw_keywords: str | None, default_keywords: list[str] | None = None) -> list[str]:
     """Mengurai daftar keyword dipisahkan koma dari .env, atau memakai default."""
     fallback = list(default_keywords or DEFAULT_KEYWORDS)
-    if not raw_keywords or not raw_keywords.strip():
-        return fallback
+    parsed = parse_csv_list(raw_keywords)
+    return parsed if parsed else fallback
 
-    parsed = [kw.strip() for kw in raw_keywords.split(",") if kw.strip()]
-    unique_keywords = list(dict.fromkeys(parsed))
-    return unique_keywords if unique_keywords else fallback
+
+def derive_topic_keywords(raw_topic_keywords: str | None, search_keywords: list[str]) -> list[str]:
+    """Mengambil kata kunci topik dari TOPIC_KEYWORDS, atau menurunkannya dari keyword pencarian."""
+    explicit = [kw.lower() for kw in parse_csv_list(raw_topic_keywords)]
+    if explicit:
+        return explicit
+
+    derived: list[str] = []
+    for kw in search_keywords:
+        for token in re.findall(r"[A-Za-z0-9]+", kw.lower()):
+            if len(token) >= 3 and token not in GENERIC_SEARCH_WORDS and token not in derived:
+                derived.append(token)
+    return derived
+
+
+def get_spam_keywords(raw_spam_keywords: str | None) -> list[str]:
+    """Menggabungkan daftar kata spam bawaan dengan tambahan kata spam dari .env."""
+    custom = [kw.lower() for kw in parse_csv_list(raw_spam_keywords)]
+    combined = list(DEFAULT_SPAM_KEYWORDS)
+    for kw in custom:
+        if kw not in combined:
+            combined.append(kw)
+    return combined
 
 
 def resolve_project_path(raw_path: str, base_dir: Path) -> Path:
@@ -258,7 +346,6 @@ def extract_relevant_links(text: str, hrefs: list[str] | None = None) -> list[tu
     found: list[tuple[str, str]] = []
     seen_urls: set[str] = set()
 
-    # Prioritaskan link grup WhatsApp agar ternormalisasi rapi
     for item in candidates:
         for match in WA_LINK_REGEX.finditer(item):
             normalized = f"https://chat.whatsapp.com/{match.group(1)}"
@@ -266,7 +353,6 @@ def extract_relevant_links(text: str, hrefs: list[str] | None = None) -> list[tu
                 seen_urls.add(normalized)
                 found.append(("Grup WhatsApp", normalized))
 
-    # Ekstrak URL penuh maupun domain populer tanpa skema (sering muncul di teks X/Twitter)
     for item in candidates:
         raw_urls: list[str] = []
         for pattern, prefix in ((GENERAL_URL_REGEX, ""), (SCHEMELESS_URL_REGEX, "https://")):
@@ -355,6 +441,40 @@ def format_tanggal(raw_date: str) -> str:
         return value
 
 
+def parse_sort_timestamp(tanggal: str) -> datetime:
+    """Mengonversi teks tanggal menjadi objek datetime untuk pengurutan postingan terbaru."""
+    value = (tanggal or "").strip()
+    if not value or value == "-":
+        return datetime.min
+
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            pass
+
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+    except ValueError:
+        pass
+
+    # Dukungan format waktu relatif singkat seperti 15m, 3h, 2d
+    rel_match = re.fullmatch(r"(\d+)([smhdw])", value.lower())
+    if rel_match:
+        amount = int(rel_match.group(1))
+        unit = rel_match.group(2)
+        delta_map = {
+            "s": timedelta(seconds=amount),
+            "m": timedelta(minutes=amount),
+            "h": timedelta(hours=amount),
+            "d": timedelta(days=amount),
+            "w": timedelta(weeks=amount),
+        }
+        return datetime.now() - delta_map[unit]
+
+    return datetime.min
+
+
 def normalize_post_url(url: str) -> str:
     """Menghapus query/fragment pada URL postingan untuk perbandingan yang konsisten."""
     if not url:
@@ -391,6 +511,7 @@ def posts_to_records(
             records.append(
                 {
                     "kategori": kategori,
+                    "nama_grup": "-",
                     "link": link,
                     "username": username,
                     "tanggal": tanggal,
@@ -415,35 +536,283 @@ def prioritize_comment_candidates(candidates: list[tuple[str, str, str]]) -> lis
     return [(url, kw) for url, kw, _ in ranked]
 
 
+# =========================
+# FILTER KUALITAS & VALIDASI LINK WHATSAPP
+# =========================
+
+class _WhatsAppMetaParser(HTMLParser):
+    """Parser HTML ringan untuk mengambil og:title, og:description, dan teks h3 pada halaman invite WA."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.og_title = ""
+        self.og_description = ""
+        self._in_h3 = False
+        self._current_h3: list[str] = []
+        self.h3_texts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr_map = {k.lower(): (v or "") for k, v in attrs}
+        if tag.lower() == "meta":
+            prop = attr_map.get("property", "").lower() or attr_map.get("name", "").lower()
+            content = html.unescape(attr_map.get("content", "")).strip()
+            if prop == "og:title" and content:
+                self.og_title = content
+            elif prop == "og:description" and content:
+                self.og_description = content
+        elif tag.lower() == "h3":
+            self._in_h3 = True
+            self._current_h3 = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_h3:
+            self._current_h3.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "h3" and self._in_h3:
+            text = html.unescape("".join(self._current_h3)).strip()
+            if text:
+                self.h3_texts.append(text)
+            self._in_h3 = False
+            self._current_h3 = []
+
+
+def parse_whatsapp_invite_html(raw_html: str) -> tuple[bool, str]:
+    """Menganalisis HTML halaman chat.whatsapp.com untuk memastikan grup aktif dan mengambil namanya."""
+    parser = _WhatsAppMetaParser()
+    parser.feed(raw_html or "")
+
+    candidate_name = parser.og_title.strip()
+    if not candidate_name:
+        for h3 in parser.h3_texts:
+            if "don't have whatsapp" not in h3.lower():
+                candidate_name = h3
+                break
+
+    low_name = candidate_name.lower().strip()
+    if not low_name or low_name in INVALID_WA_TITLES:
+        return False, ""
+
+    invalid_fragments = ("expired", "revoked", "reset", "couldn't find")
+    if any(frag in low_name for frag in invalid_fragments):
+        return False, ""
+
+    return True, candidate_name
+
+
+def check_whatsapp_invite(url: str, timeout: float = 10.0) -> tuple[bool, str, str]:
+    """Mengecek validitas link chat.whatsapp.com via HTTP GET dan mengembalikan (valid, nama_grup, alasan)."""
+    if not url.startswith("https://chat.whatsapp.com/"):
+        return False, "", "bukan_link_wa"
+
+    req = Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "Accept-Encoding": "identity",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
+
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return False, "", f"http_{getattr(resp, 'status', 0)}"
+            raw_html = resp.read(200_000).decode("utf-8", errors="ignore")
+            is_valid, group_name = parse_whatsapp_invite_html(raw_html)
+            return is_valid, group_name, ("valid" if is_valid else "mati_atau_direset")
+    except HTTPError as err:
+        return False, "", f"http_{err.code}"
+    except (URLError, TimeoutError, ValueError) as exc:
+        return False, "", f"network_error:{exc}"
+
+
+def is_spam_text(text: str, spam_keywords: list[str]) -> bool:
+    """Mengecek apakah teks mengandung kata spam (dengan batas kata agar akurat)."""
+    if not text or not spam_keywords:
+        return False
+    escaped = [re.escape(kw.strip()) for kw in spam_keywords if kw.strip()]
+    if not escaped:
+        return False
+    pattern = re.compile(r"\b(?:" + "|".join(escaped) + r")\b", re.IGNORECASE)
+    return bool(pattern.search(text))
+
+
+def is_relevant_topic(text: str, topic_keywords: list[str]) -> bool:
+    """Mengecek apakah teks atau nama grup relevan dengan minimal satu keyword topik."""
+    if not topic_keywords:
+        return True
+    low = (text or "").lower()
+    for kw in topic_keywords:
+        token = kw.strip().lower()
+        if not token:
+            continue
+        if len(token) <= 3:
+            if re.search(rf"\b{re.escape(token)}\b", low):
+                return True
+        elif token in low:
+            return True
+    return False
+
+
 def deduplicate_and_sort_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Menghapus duplikat berdasarkan URL dan mengurutkan berdasarkan kategori lalu tanggal terbaru."""
+    """Menghapus duplikat URL lalu mengurutkan dari postingan terbaru."""
+    sorted_input = sorted(
+        records,
+        key=lambda r: parse_sort_timestamp(r.get("tanggal", "")),
+        reverse=True,
+    )
+
     seen_links: set[str] = set()
     unique_records: list[dict[str, str]] = []
-
-    for record in records:
+    for record in sorted_input:
         link = record.get("link", "").strip()
         if not link or link in seen_links:
             continue
         seen_links.add(link)
         unique_records.append(record)
 
-    unique_records.sort(key=lambda r: r.get("tanggal", ""), reverse=True)
-    unique_records.sort(key=lambda r: CATEGORY_PRIORITY.get(r.get("kategori", "Link Lainnya"), 99))
-
     for idx, record in enumerate(unique_records, start=1):
         record["no"] = str(idx)
-
     return unique_records
 
 
+def filter_and_validate_records(
+    records: list[dict[str, str]],
+    topic_keywords: list[str],
+    spam_keywords: list[str],
+    validate_wa: bool = True,
+    wa_delay_min: float = DEFAULT_WA_CHECK_DELAY_MIN,
+    wa_delay_max: float = DEFAULT_WA_CHECK_DELAY_MAX,
+    max_wa_checks: int = DEFAULT_MAX_WA_CHECKS,
+    only_whatsapp: bool = False,
+    wa_checker: Any = None,
+) -> list[dict[str, str]]:
+    """Menjalankan filter duplikat, urut terbaru, anti-spam, validasi WA berjeda, dan relevansi topik."""
+    checker = wa_checker or check_whatsapp_invite
+    unique_records = deduplicate_and_sort_records(records)
+
+    stats = {
+        "awal": len(records),
+        "unik": len(unique_records),
+        "spam": 0,
+        "non_wa_dilewati": 0,
+        "wa_mati": 0,
+        "tidak_relevan": 0,
+        "lolos": 0,
+    }
+
+    passed_records: list[dict[str, str]] = []
+    wa_checks_done = 0
+
+    for record in unique_records:
+        kategori = record.get("kategori", "Link Lainnya")
+        link = record.get("link", "")
+        combined_post_text = f"{record.get('ringkasan_info', '')} {record.get('username', '')}"
+
+        if only_whatsapp and kategori != "Grup WhatsApp":
+            stats["non_wa_dilewati"] += 1
+            continue
+
+        # Filter anti-spam awal pada teks postingan dan akun
+        if is_spam_text(combined_post_text, spam_keywords):
+            stats["spam"] += 1
+            continue
+
+        nama_grup = record.get("nama_grup", "-") or "-"
+
+        # Cek validitas link chat.whatsapp.com secara pelan-pelan dan ambil nama grupnya
+        if kategori == "Grup WhatsApp" and validate_wa:
+            if wa_checks_done >= max_wa_checks:
+                print(f"[INFO] Batas {max_wa_checks} cek link WA per sesi tercapai.")
+                break
+
+            if wa_checks_done > 0:
+                delay = random.uniform(wa_delay_min, wa_delay_max)
+                print(f"[INFO] Jeda cek WA {delay:.2f}s sebelum memeriksa link berikutnya...")
+                time.sleep(delay)
+
+            wa_checks_done += 1
+            is_valid, fetched_name, reason = checker(link)
+            if not is_valid:
+                print(f"[DROP] Link WA tidak valid ({reason}): {link}")
+                stats["wa_mati"] += 1
+                continue
+
+            nama_grup = fetched_name or "-"
+            record["nama_grup"] = nama_grup
+            print(f"[OK] Link WA aktif: {nama_grup} -> {link}")
+
+            # Cek anti-spam lagi terhadap nama grup WhatsApp yang baru diambil
+            if is_spam_text(nama_grup, spam_keywords):
+                print(f"[DROP] Nama grup terdeteksi spam: {nama_grup}")
+                stats["spam"] += 1
+                continue
+
+        # Filter relevansi topik terhadap teks postingan dan nama grup
+        relevance_text = f"{record.get('ringkasan_info', '')} {nama_grup}"
+        if not is_relevant_topic(relevance_text, topic_keywords):
+            stats["tidak_relevan"] += 1
+            continue
+
+        passed_records.append(record)
+
+    # Pastikan urutan akhir tetap dari postingan terbaru dengan nomor urut rapi 1..N
+    passed_records.sort(key=lambda r: parse_sort_timestamp(r.get("tanggal", "")), reverse=True)
+    for idx, rec in enumerate(passed_records, start=1):
+        rec["no"] = str(idx)
+    stats["lolos"] = len(passed_records)
+
+    print(
+        "\n[FILTER] Ringkasan seleksi -> "
+        f"mentah={stats['awal']} | unik={stats['unik']} | spam={stats['spam']} "
+        f"| wa_mati={stats['wa_mati']} | tidak_relevan={stats['tidak_relevan']} "
+        f"| lolos={stats['lolos']}"
+    )
+    return passed_records
+
+
+def apply_quality_filters_from_env(
+    records: list[dict[str, str]],
+    search_keywords: list[str],
+    wa_checker: Any = None,
+) -> list[dict[str, str]]:
+    """Membaca konfigurasi filter kualitas dari .env lalu menjalankan seluruh filter & validasi WA."""
+    topic_keywords = derive_topic_keywords(os.getenv("TOPIC_KEYWORDS"), search_keywords)
+    spam_keywords = get_spam_keywords(os.getenv("SPAM_KEYWORDS"))
+    validate_wa = os.getenv("VALIDATE_WA_LINKS", "true").strip().lower() == "true"
+    only_whatsapp = os.getenv("ONLY_WHATSAPP_LINKS", "false").strip().lower() == "true"
+    wa_delay_min = parse_float_env("WA_CHECK_DELAY_MIN", DEFAULT_WA_CHECK_DELAY_MIN, minimum=0.5)
+    wa_delay_max = max(wa_delay_min, parse_float_env("WA_CHECK_DELAY_MAX", DEFAULT_WA_CHECK_DELAY_MAX, minimum=1.0))
+    max_wa_checks = parse_int_env("MAX_WA_CHECKS_PER_SESSION", DEFAULT_MAX_WA_CHECKS, minimum=1)
+
+    print(f"[FILTER] Kata topik aktif: {topic_keywords}")
+    return filter_and_validate_records(
+        records,
+        topic_keywords=topic_keywords,
+        spam_keywords=spam_keywords,
+        validate_wa=validate_wa,
+        wa_delay_min=wa_delay_min,
+        wa_delay_max=wa_delay_max,
+        max_wa_checks=max_wa_checks,
+        only_whatsapp=only_whatsapp,
+        wa_checker=wa_checker,
+    )
+
+
 def save_to_csv(records: list[dict[str, str]], output_path: Path) -> None:
-    """Menyimpan hasil ekstraksi yang sudah dirapikan ke file CSV (UTF-8 BOM)."""
+    """Menyimpan hasil berkualitas yang lolos filter ke file CSV (UTF-8 BOM)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "no",
+        "tanggal",
         "kategori",
+        "nama_grup",
         "link",
         "username",
-        "tanggal",
         "sumber",
         "keyword",
         "ringkasan_info",
@@ -455,55 +824,54 @@ def save_to_csv(records: list[dict[str, str]], output_path: Path) -> None:
         for idx, record in enumerate(records, start=1):
             row = {key: record.get(key, "") for key in fieldnames}
             row["no"] = record.get("no") or str(idx)
+            row["nama_grup"] = row["nama_grup"] or "-"
             writer.writerow(row)
 
 
 def save_to_markdown(records: list[dict[str, str]], md_path: Path, platform_name: str = "Threads") -> None:
-    """Menyimpan ringkasan hasil dalam tabel Markdown agar nyaman dibaca."""
+    """Menyimpan hasil yang lolos filter dalam tabel Markdown terurut dari terbaru."""
     lines = [
         f"# Hasil Pencarian Grup & Referensi {platform_name}",
         "",
-        f"Total link unik ditemukan: **{len(records)}**",
+        f"Total link berkualitas yang lolos filter: **{len(records)}** (diurutkan dari terbaru)",
         "",
+        "| No | Tanggal | Kategori | Nama Grup | Link | Akun | Sumber | Ringkasan Info |",
+        "|---:|---|---|---|---|---|---|---|",
     ]
 
-    grouped: dict[str, list[dict[str, str]]] = {}
-    for rec in records:
-        grouped.setdefault(rec.get("kategori", "Link Lainnya"), []).append(rec)
+    for idx, item in enumerate(records, start=1):
+        tanggal = item.get("tanggal", "-")
+        kategori = item.get("kategori", "-")
+        nama_grup = (item.get("nama_grup", "-") or "-").replace("|", "/")
+        link = item.get("link", "")
+        username = item.get("username", "-")
+        sumber = item.get("sumber", "-")
+        info = item.get("ringkasan_info", "-").replace("|", "/")
+        post_url = item.get("post_url", "")
+        akun_cell = f"[{username}]({post_url})" if post_url else username
+        lines.append(
+            f"| {idx} | {tanggal} | {kategori} | {nama_grup} | {link} | {akun_cell} | {sumber} | {info} |"
+        )
+    lines.append("")
 
-    for kategori, items in grouped.items():
-        lines.append(f"## {kategori} ({len(items)})")
-        lines.append("")
-        lines.append("| No | Link | Akun | Tanggal | Sumber | Ringkasan Info |")
-        lines.append("|---:|---|---|---|---|---|")
-        for idx, item in enumerate(items, start=1):
-            link = item.get("link", "")
-            username = item.get("username", "-")
-            tanggal = item.get("tanggal", "-")
-            sumber = item.get("sumber", "-")
-            info = item.get("ringkasan_info", "-").replace("|", "/")
-            post_url = item.get("post_url", "")
-            akun_cell = f"[{username}]({post_url})" if post_url else username
-            lines.append(f"| {idx} | {link} | {akun_cell} | {tanggal} | {sumber} | {info} |")
-        lines.append("")
-
+    md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def print_summary(records: list[dict[str, str]], csv_path: Path, md_path: Path) -> None:
-    """Menampilkan ringkasan hasil scraping yang rapi per kategori di terminal."""
+    """Menampilkan ringkasan hasil akhir yang lolos filter di terminal."""
     counts: dict[str, int] = {}
     for rec in records:
         kat = rec.get("kategori", "Link Lainnya")
         counts[kat] = counts.get(kat, 0) + 1
 
-    print("\n================ RINGKASAN HASIL ================")
-    print(f"Total link unik : {len(records)}")
+    print("\n================ RINGKASAN HASIL LOLOS FILTER ================")
+    print(f"Total link lolos: {len(records)}")
     for kat, total in counts.items():
         print(f"  - {kat:<16}: {total}")
     print(f"File CSV        : {csv_path.resolve()}")
     print(f"File Markdown   : {md_path.resolve()}")
-    print("=================================================\n")
+    print("==============================================================\n")
 
 
 # =========================

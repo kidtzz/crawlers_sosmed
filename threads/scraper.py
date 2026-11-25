@@ -14,7 +14,7 @@ ROOT_DIR = BASE_DIR.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from crawler_utils import (  # noqa: E402
+from shared.crawler_utils import (  # noqa: E402
     DEFAULT_KEYWORDS,
     DEFAULT_MAX_COMMENT_POSTS,
     DEFAULT_MAX_COMMENT_SCROLLS,
@@ -22,6 +22,7 @@ from crawler_utils import (  # noqa: E402
     DEFAULT_MAX_SCROLLS_PER_SESSION,
     DEFAULT_SCROLL_DELAY_MAX,
     DEFAULT_SCROLL_DELAY_MIN,
+    apply_quality_filters_from_env,
     clean_post_text,
     deduplicate_and_sort_records,
     enable_fast_routing,
@@ -339,7 +340,7 @@ def main() -> None:
     max_comment_scrolls = parse_int_env("MAX_COMMENT_SCROLLS_PER_POST", DEFAULT_MAX_COMMENT_SCROLLS, minimum=0)
 
     state_path = resolve_project_path(os.getenv("STORAGE_STATE_FILE", "storage_state.json"))
-    output_csv = resolve_project_path(os.getenv("OUTPUT_CSV", "hasil_grup_wa.csv"))
+    output_csv = resolve_project_path(os.getenv("OUTPUT_CSV", "output/hasil_grup_wa.csv"))
     output_md = output_csv.with_suffix(".md")
 
     print(f"[INFO] Keyword aktif ({len(keywords)}): {keywords}")
@@ -428,13 +429,13 @@ def main() -> None:
         finally:
             browser.close()
 
-    unique_records = deduplicate_and_sort_records(all_records)
-    if unique_records:
-        save_to_csv(unique_records, output_csv)
-        save_to_markdown(unique_records, output_md, platform_name="Threads")
-        print_summary(unique_records, output_csv, output_md)
+    filtered_records = apply_quality_filters_from_env(all_records, keywords)
+    if filtered_records:
+        save_to_csv(filtered_records, output_csv)
+        save_to_markdown(filtered_records, output_md, platform_name="Threads")
+        print_summary(filtered_records, output_csv, output_md)
     else:
-        print("\n[SELESAI] Tidak ada link grup/referensi yang ditemukan pada sesi ini.")
+        print("\n[SELESAI] Tidak ada link grup/referensi yang lolos filter pada sesi ini.")
 
 
 if __name__ == "__main__":
